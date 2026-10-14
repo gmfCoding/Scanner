@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TIFF Layer Editor</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div data-view="editor">
+          <p class="eyebrow">Browser-only editor</p>
+          <h1>TIFF Layer Editor</h1>
+        </div>
+        <div data-view="admin" hidden>
+          <p class="eyebrow">Configuration</p>
+          <h1>Container types &amp; data lists</h1>
+        </div>
+        <div class="topbar-actions" data-view="admin" hidden>
+          <a class="button" href="#/">Back to editor</a>
+          <button id="export-config" class="button" type="button">Export</button>
+          <button id="import-config" class="button" type="button">Import (replace)</button>
+          <button id="merge-config" class="button button-primary" type="button">Import (merge)</button>
+          <input id="config-file" type="file" accept=".json,application/json" />
+        </div>
+        <div class="topbar-actions" data-view="editor">
+          <a class="button" href="#/admin">Admin</a>
+          <label class="button button-primary" for="file-input">Open TIFF</label>
+          <input id="file-input" type="file" accept=".tif,.tiff,image/tiff" />
+          <button id="export-button" class="button button-accent" type="button" disabled>Export TIFF</button>
+        </div>
+      </header>
+
+      <div data-view="editor">
+      <section id="drop-zone" class="drop-zone" aria-label="Drop a TIFF file here">
+        <strong>Drop a TIFF file here</strong>
+        <span>or use Open TIFF to choose a multi-page TIFF.</span>
+      </section>
+
+      <section id="workspace" class="workspace is-empty">
+        <aside class="sidebar" aria-label="Layer hierarchy">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Hierarchy</p>
+              <h2 id="layer-count">No layers</h2>
+            </div>
+            <button id="clear-selection-button" class="icon-button" type="button" title="Clear selection" disabled>×</button>
+          </div>
+          <div id="layer-tree" class="layer-tree" tabindex="0"></div>
+        </aside>
+
+        <section class="viewer-panel" aria-label="Selected layer preview">
+          <div id="preview-empty" class="preview-empty">
+            <strong>Select a layer</strong>
+            <span>Use Ctrl/Cmd + click to toggle layers in the hierarchy.</span>
+          </div>
+          <div id="preview-content" class="preview-content" hidden>
+            <div class="preview-heading">
+              <div>
+                <p class="eyebrow">Full preview</p>
+                <h2 id="preview-title"></h2>
+              </div>
+              <span id="preview-details" class="preview-details"></span>
+            </div>
+            <div class="preview-canvas-wrap">
+              <div id="preview-stage" class="preview-stage">
+                <canvas id="preview-canvas"></canvas>
+                <svg id="preview-overlay" class="preview-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="actions-panel" aria-label="Layer actions">
+          <p class="eyebrow">Selection actions</p>
+          <p id="selection-summary" class="selection-summary">No layers selected</p>
+          <div class="action-grid">
+            <button id="move-up-button" class="button" type="button" disabled>Move up</button>
+            <button id="move-down-button" class="button" type="button" disabled>Move down</button>
+            <button id="duplicate-button" class="button" type="button" disabled>Duplicate</button>
+            <button id="delete-button" class="button button-danger" type="button" disabled>Delete</button>
+            <button id="group-button" class="button" type="button" disabled>New container</button>
+            <button id="ungroup-button" class="button" type="button" disabled>Ungroup</button>
+          </div>
+          <p class="eyebrow">Page</p>
+          <div class="action-grid">
+            <button id="rotate-left-button" class="button" type="button" disabled>Rotate left</button>
+            <button id="rotate-right-button" class="button" type="button" disabled>Rotate right</button>
+            <button id="mirror-h-button" class="button" type="button" disabled>Mirror horizontal</button>
+            <button id="mirror-v-button" class="button" type="button" disabled>Mirror vertical</button>
+            <button id="censor-button" class="button button-wide" type="button" aria-pressed="false" disabled>Censor tool</button>
+          </div>
+          <div id="censor-panel" class="inspector" hidden></div>
+          <p class="help-text">Drag layers or containers to reorder them; the highlighted line shows where they will land. Containers become separator pages on export.</p>
+          <div id="inspector" class="inspector" hidden></div>
+        </aside>
+      </section>
+      </div>
+
+      <div data-view="admin" class="admin-grid" hidden>
+        <section class="admin-section" aria-label="Container types">
+          <div class="panel-heading">
+            <h2>Container types</h2>
+            <button id="add-type" class="button" type="button">Add type</button>
+          </div>
+          <div id="types"></div>
+        </section>
+        <section class="admin-section" aria-label="Data lists">
+          <div class="panel-heading">
+            <h2>Data lists</h2>
+            <button id="add-list" class="button" type="button">Add list</button>
+          </div>
+          <div id="lists"></div>
+        </section>
+      </div>
+    </main>
+
+    <div id="context-menu" class="context-menu" hidden></div>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+    <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
+    <script src="config.js"></script>
+    <script src="colorpicker.js"></script>
+    <script src="admin.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
