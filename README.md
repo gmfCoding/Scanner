@@ -13,3 +13,7 @@ A responsive, browser-only TIFF layer editor. Open `index.html` through a local 
 - Yields between page decodes so large multi-page files do not monopolize the main thread.
 
 The app uses vanilla HTML, CSS, and JavaScript. TIFF decoding is provided by the browser-loaded [UTIF](https://github.com/photopea/UTIF.js) codec; no build step is required.
+
+## Standalone bundle
+
+Run `./bundle.sh` to create `dist/index.html`, a single-file offline bundle with the stylesheet, application scripts, and pinned UTIF runtime inlined. Pass an output path to write the bundle elsewhere, for example `./bundle.sh release/scanner.html`.
