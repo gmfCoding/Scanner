@@ -37,6 +37,9 @@ const elements = {
 // root holds loose layers and containers; a container's children are layers.
 const state = { activeId: null, config: Config.load(), root: [], selectedIds: new Set(), sourceName: "layers" };
 const DESCRIPTION_PREFIX = "scanner-container:";
+const TIFF_SEPARATOR_DPI = 72;
+const TIFF_SEPARATOR_WIDTH = 595;
+const TIFF_SEPARATOR_HEIGHT = 842;
 let nextId = 1;
 
 /* ---------- undo / redo ---------- */
@@ -175,11 +178,10 @@ function createContainer(name) {
   return { id: newId("container"), kind: "container", name, typeId: "", values: {}, overrides: {}, collapsed: false, children: [], separator: null };
 }
 
-function blackPage(width, dpi) {
-  const height = Math.max(48, Math.round(width * 0.075));
-  const pixels = new Uint8Array(width * height * 4);
+function blackPage() {
+  const pixels = new Uint8Array(TIFF_SEPARATOR_WIDTH * TIFF_SEPARATOR_HEIGHT * 4);
   for (let pixel = 3; pixel < pixels.length; pixel += 4) pixels[pixel] = 255;
-  return { width, height, dpi, pixels };
+  return { width: TIFF_SEPARATOR_WIDTH, height: TIFF_SEPARATOR_HEIGHT, dpi: TIFF_SEPARATOR_DPI, pixels };
 }
 
 function legacyJpegStreams(buffer) {
@@ -859,7 +861,11 @@ window.addEventListener("keydown", (event) => {
     else if (historyKey === "c") { event.preventDefault(); copySelected(); }
     else if (historyKey === "v") { event.preventDefault(); pasteClipboard(); }
   }
-  if ((event.key === "Delete" || event.key === "Backspace") && !typing && censorState.active && censorState.selectedId) removeCensor(censorState.selectedId);
+  if (event.key === "Delete" && !typing && !drag && !censorDrag && location.hash !== "#/admin" && !document.querySelector(".modal-backdrop") && state.selectedIds.size) {
+    event.preventDefault();
+    confirmDelete();
+  }
+  if (event.key === "Backspace" && !typing && censorState.active && censorState.selectedId) removeCensor(censorState.selectedId);
 });
 window.addEventListener("click", (event) => {
   if (!elements.contextMenu.contains(event.target)) hideContextMenu();
@@ -1333,14 +1339,21 @@ async function loadTiff(file) {
         UTIF.decodeImage(buffer, ifd);
         page = { height: ifd.height, pixels: UTIF.toRGBA8(ifd), width: ifd.width };
       }
-      if (isBlackSeparator(page.pixels)) {
-        const meta = readDescription(ifd) ?? {};
-        current = createContainer(typeof meta.name === "string" && meta.name ? meta.name : `Container ${root.filter(isContainer).length + 1}`);
-        current.typeId = typeof meta.typeId === "string" ? meta.typeId : "";
-        if (meta.values && typeof meta.values === "object") current.values = Object.fromEntries(Object.entries(meta.values).map(([key, value]) => [key, String(value)]));
-        if (meta.overrides && typeof meta.overrides === "object") current.overrides = { ...meta.overrides };
-        current.separator = { width: page.width, height: page.height, dpi: 300, pixels: new Uint8Array(page.pixels) };
+      const meta = readDescription(ifd);
+      const separator = isBlackSeparator(page.pixels);
+      if (separator || meta) {
+        const containerMeta = meta ?? {};
+        current = createContainer(typeof containerMeta.name === "string" && containerMeta.name ? containerMeta.name : `Container ${root.filter(isContainer).length + 1}`);
+        current.typeId = typeof containerMeta.typeId === "string" ? containerMeta.typeId : "";
+        if (containerMeta.values && typeof containerMeta.values === "object") current.values = Object.fromEntries(Object.entries(containerMeta.values).map(([key, value]) => [key, String(value)]));
+        if (containerMeta.overrides && typeof containerMeta.overrides === "object") current.overrides = { ...containerMeta.overrides };
         root.push(current);
+        if (separator) {
+          current.separator = { width: page.width, height: page.height, dpi: 300, pixels: new Uint8Array(page.pixels) };
+        } else {
+          layerNumber += 1;
+          current.children.push(createLayer(page.pixels, page.width, page.height, layerNumber, 300));
+        }
       } else {
         layerNumber += 1;
         (current ? current.children : root).push(createLayer(page.pixels, page.width, page.height, layerNumber, 300));
@@ -1381,9 +1394,13 @@ function exportPages() {
       pages.push(bakedPage(entry));
       continue;
     }
-    const basis = entry.children[0] ?? entry.separator;
-    const separator = entry.separator ?? blackPage(basis?.width ?? 1240, basis?.dpi ?? 300);
-    pages.push({ ...separator, description: describeContainer(entry) }, ...entry.children.map(bakedPage));
+    const children = entry.children.map(bakedPage);
+    if (pages.length === 0 && children.length) {
+      children[0].description = describeContainer(entry);
+      pages.push(...children);
+    } else {
+      pages.push({ ...blackPage(), description: describeContainer(entry) }, ...children);
+    }
   }
   return pages;
 }
