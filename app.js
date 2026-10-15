@@ -11,6 +11,7 @@ const elements = {
   group: document.querySelector("#group-button"),
   inspector: document.querySelector("#inspector"),
   layerCount: document.querySelector("#layer-count"),
+  groupLoose: document.querySelector("#group-loose-button"),
   layerTree: document.querySelector("#layer-tree"),
   censorButton: document.querySelector("#censor-button"),
   censorPanel: document.querySelector("#censor-panel"),
@@ -37,6 +38,58 @@ const elements = {
 const state = { activeId: null, config: Config.load(), root: [], selectedIds: new Set(), sourceName: "layers" };
 const DESCRIPTION_PREFIX = "scanner-container:";
 let nextId = 1;
+
+/* ---------- undo / redo ---------- */
+
+// Snapshots share the immutable pixel data and copy everything else.
+const undoStack = [];
+const redoStack = [];
+let coalesceKey = null;
+
+function cloneEntry(entry) {
+  if (isContainer(entry)) return { ...entry, values: { ...entry.values }, overrides: { ...entry.overrides }, children: entry.children.map(cloneEntry) };
+  return { ...entry, censors: entry.censors.map((censor) => ({ ...censor })) };
+}
+
+function snapshot() {
+  return { activeId: state.activeId, root: state.root.map(cloneEntry), selectedIds: new Set(state.selectedIds) };
+}
+
+function pushHistory(before) {
+  undoStack.push(before);
+  if (undoStack.length > 100) undoStack.shift();
+  redoStack.length = 0;
+}
+
+// A key coalesces consecutive edits (e.g. typing) into one undo step until the next change event.
+function checkpoint(key = null) {
+  if (key && key === coalesceKey) return;
+  coalesceKey = key;
+  pushHistory(snapshot());
+}
+
+function restore(target) {
+  state.root = target.root;
+  state.selectedIds = target.selectedIds;
+  state.activeId = target.activeId;
+  coalesceKey = null;
+  render();
+}
+
+function stepHistory(from, to, emptyMessage) {
+  const target = from.pop();
+  if (!target) {
+    setStatus(emptyMessage);
+    return;
+  }
+  to.push(snapshot());
+  restore(target);
+}
+
+const undo = () => stepHistory(undoStack, redoStack, "Nothing to undo.");
+const redo = () => stepHistory(redoStack, undoStack, "Nothing to redo.");
+
+document.addEventListener("change", () => { coalesceKey = null; }, true);
 
 function nextFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
@@ -315,25 +368,26 @@ function fieldControl(container, field) {
     control.append(new Option("— choose —", ""));
     for (const option of options) control.append(new Option(option.label, option.value));
     control.value = value;
-    control.addEventListener("change", () => { container.values[field.id] = control.value; });
+    control.addEventListener("change", () => { checkpoint(); container.values[field.id] = control.value; });
   } else {
     control = document.createElement("input");
     control.type = "text";
     control.value = value;
     control.classList.toggle("is-overridden", Boolean(overridden));
     if (overridden) control.title = "Overridden — right-click to revert to the list";
-    control.addEventListener("input", () => { container.values[field.id] = control.value; });
+    control.addEventListener("input", () => { checkpoint(`field-${container.id}-${field.id}`); container.values[field.id] = control.value; });
   }
   if (options) {
     control.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       showContextMenu(event, [overridden
         ? { label: "Revert to list", action: () => {
+          checkpoint();
           delete container.overrides[field.id];
           if (!options.some((option) => option.value === container.values[field.id])) container.values[field.id] = "";
           renderInspector();
         } }
-        : { label: "Override", action: () => { container.overrides[field.id] = true; renderInspector(); } }]);
+        : { label: "Override", action: () => { checkpoint(); container.overrides[field.id] = true; renderInspector(); } }]);
     });
   }
   return labeled(field.label || "(unnamed field)", control);
@@ -353,13 +407,13 @@ function renderInspector() {
   const name = document.createElement("input");
   name.type = "text";
   name.value = container.name;
-  name.addEventListener("change", () => { container.name = name.value.trim() || container.name; renderTree(); });
+  name.addEventListener("change", () => { checkpoint(); container.name = name.value.trim() || container.name; renderTree(); });
 
   const type = document.createElement("select");
   type.append(new Option("No type", ""));
   for (const candidate of state.config.types) type.append(new Option(candidate.name, candidate.id));
   type.value = typeOf(container) ? container.typeId : "";
-  type.addEventListener("change", () => { container.typeId = type.value; render(); });
+  type.addEventListener("change", () => { checkpoint(); container.typeId = type.value; render(); });
 
   elements.inspector.append(heading, labeled("Name", name), labeled("Type", type));
   for (const field of typeOf(container)?.fields ?? []) elements.inspector.append(fieldControl(container, field));
@@ -383,6 +437,7 @@ function render() {
     button.disabled = selected.length === 0;
   }
   elements.ungroup.disabled = !selected.some(isContainer);
+  elements.groupLoose.disabled = !state.root.some((entry) => !isContainer(entry));
   for (const button of [elements.rotateLeft, elements.rotateRight, elements.mirrorH, elements.mirrorV]) button.disabled = selected.length === 0;
   elements.censorButton.disabled = !activeLayer();
   elements.censorButton.classList.toggle("is-active", censorState.active);
@@ -397,6 +452,7 @@ function render() {
 /* ---------- editing operations ---------- */
 
 function applyMove(ids, target) {
+  checkpoint();
   const parent = target.parentId ? locate(target.parentId)?.entry : null;
   const list = parent ? parent.children : state.root;
   const moving = new Set(ids);
@@ -414,6 +470,7 @@ function applyMove(ids, target) {
 }
 
 function moveSelected(direction) {
+  checkpoint();
   for (const list of allLists()) {
     const isSelected = (index) => state.selectedIds.has(list[index].id);
     if (direction < 0) {
@@ -429,19 +486,51 @@ function moveSelected(direction) {
   render();
 }
 
-function copyEntry(entry) {
-  const copy = { ...entry, id: newId(entry.kind), name: `${entry.name} copy` };
+function copyEntry(entry, suffix = " copy") {
+  const copy = { ...entry, id: newId(entry.kind), name: `${entry.name}${suffix}` };
   if (isContainer(entry)) {
     copy.values = { ...entry.values };
     copy.overrides = { ...entry.overrides };
-    copy.children = entry.children.map(copyEntry);
+    copy.children = entry.children.map((child) => copyEntry(child, suffix));
   } else {
     copy.censors = entry.censors.map((censor) => ({ ...censor, id: newId("censor") }));
   }
   return copy;
 }
 
+let clipboard = [];
+
+function copySelected() {
+  const selected = selectedEntries();
+  if (!selected.length) return;
+  clipboard = selected
+    .filter((entry) => !state.selectedIds.has(locate(entry.id).parent?.id))
+    .map((entry) => copyEntry(entry, ""));
+  setStatus(`Copied ${clipboard.length} item${clipboard.length === 1 ? "" : "s"}.`);
+}
+
+function pasteClipboard() {
+  if (!clipboard.length) return;
+  checkpoint();
+  const copies = clipboard.map((entry) => copyEntry(entry, ""));
+  const target = selectedEntries()[0];
+  let list = state.root;
+  let index = state.root.length;
+  if (target) {
+    const location = locate(target.id);
+    // Containers cannot nest, so they paste above the target's top-level container.
+    const anchor = copies.some(isContainer) ? location.parent ?? location.entry : location.entry;
+    list = copies.some(isContainer) ? state.root : location.list;
+    index = list.indexOf(anchor);
+  }
+  list.splice(index, 0, ...copies);
+  state.selectedIds = new Set(copies.map((entry) => entry.id));
+  state.activeId = copies.at(-1).id;
+  render();
+}
+
 function duplicateSelected() {
+  checkpoint();
   const copies = [];
   const duplicateIn = (list, parentSelected) => {
     const result = [];
@@ -464,6 +553,7 @@ function duplicateSelected() {
 }
 
 function deleteSelected() {
+  checkpoint();
   state.root = state.root.filter((entry) => !state.selectedIds.has(entry.id));
   for (const container of state.root.filter(isContainer)) container.children = container.children.filter((child) => !state.selectedIds.has(child.id));
   clearSelection();
@@ -475,6 +565,7 @@ function groupSelected() {
     setStatus("Select one or more image layers to put in a container.", true);
     return;
   }
+  checkpoint();
   const first = locate(selected[0].id);
   const container = createContainer(`Container ${state.root.filter(isContainer).length + 1}`);
   state.root.splice(state.root.indexOf(first.parent ?? first.entry), 0, container);
@@ -489,7 +580,119 @@ function groupSelected() {
   render();
 }
 
+// Each selected loose layer closes the group above it; the last selected layer and those below stay loose.
+function insertSeparatorsMulti() {
+  if (!state.root.some((entry) => !isContainer(entry) && state.selectedIds.has(entry.id))) {
+    setStatus("Select loose layers to insert separators above.", true);
+    return;
+  }
+  checkpoint();
+  let count = state.root.filter(isContainer).length;
+  const result = [];
+  let index = 0;
+  while (index < state.root.length) {
+    if (isContainer(state.root[index])) {
+      result.push(state.root[index]);
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < state.root.length && !isContainer(state.root[end])) end += 1;
+    const run = state.root.slice(index, end);
+    index = end;
+    if (!run.some((layer) => state.selectedIds.has(layer.id))) {
+      result.push(...run);
+      continue;
+    }
+    let current = [];
+    const flush = () => {
+      if (!current.length) return;
+      count += 1;
+      const container = createContainer(`Container ${count}`);
+      container.children = current;
+      result.push(container);
+      current = [];
+    };
+    const lastCut = run.findLastIndex((layer) => state.selectedIds.has(layer.id));
+    for (const layer of run.slice(0, lastCut)) {
+      if (state.selectedIds.has(layer.id)) flush();
+      current.push(layer);
+    }
+    flush();
+    result.push(...run.slice(lastCut));
+  }
+  state.root = result;
+  setStatus("Separators inserted.");
+  render();
+}
+
+// Groups the loose layers directly above the first selected layer; it and the layers below stay ungrouped.
+function insertSeparatorAbove() {
+  if (selectedEntries().filter((entry) => !isContainer(entry)).length > 1) {
+    insertSeparatorsMulti();
+    return;
+  }
+  const layer = selectedEntries().find((entry) => !isContainer(entry));
+  if (!layer) {
+    setStatus("Select a layer to insert a separator above.", true);
+    return;
+  }
+  const location = locate(layer.id);
+  if (location.parent) {
+    if (location.index === 0) {
+      setStatus("A separator already sits above this layer.");
+      return;
+    }
+    checkpoint();
+    const remainder = location.list.splice(location.index);
+    state.root.splice(state.root.indexOf(location.parent) + 1, 0, ...remainder);
+    setStatus("Layers from here down were released from the container.");
+  } else {
+    const { root } = state;
+    let start = location.index;
+    while (start > 0 && !isContainer(root[start - 1])) start -= 1;
+    if (start === location.index) {
+      setStatus("There are no loose layers above to group.");
+      return;
+    }
+    checkpoint();
+    const above = createContainer(`Container ${root.filter(isContainer).length + 1}`);
+    above.children = root.splice(start, location.index - start, above);
+    setStatus("Layers above grouped.");
+  }
+  render();
+}
+
+function groupLoose() {
+  if (!state.root.some((entry) => !isContainer(entry))) return;
+  checkpoint();
+  let count = state.root.filter(isContainer).length;
+  const result = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    count += 1;
+    const container = createContainer(`Container ${count}`);
+    container.children = run;
+    result.push(container);
+    run = [];
+  };
+  for (const entry of state.root) {
+    if (isContainer(entry)) {
+      flush();
+      result.push(entry);
+    } else {
+      run.push(entry);
+    }
+  }
+  flush();
+  state.root = result;
+  setStatus("Loose layers grouped.");
+  render();
+}
+
 function ungroupSelected() {
+  checkpoint();
   const released = [];
   for (const container of state.root.filter((entry) => isContainer(entry) && state.selectedIds.has(entry.id))) {
     state.root.splice(state.root.indexOf(container), 1, ...container.children);
@@ -636,9 +839,25 @@ window.addEventListener("pointercancel", () => endDrag(false));
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { endDrag(false); hideContextMenu(); }
   const typing = event.target.closest?.("input, select, textarea");
+  if (event.key === "F2" && !typing && location.hash !== "#/admin") {
+    const target = selectedEntries().at(-1);
+    if (target) { event.preventDefault(); startRename(target.id); }
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
+    event.preventDefault();
+    if (!typing && location.hash !== "#/admin") insertSeparatorAbove();
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "g") {
     event.preventDefault();
     if (!typing && location.hash !== "#/admin") groupSelected();
+  }
+  const textEditing = event.target.closest?.("input:not([type=color]), textarea");
+  const historyKey = (event.ctrlKey || event.metaKey) ? event.key.toLowerCase() : "";
+  if (!textEditing && !drag && !censorDrag && location.hash !== "#/admin" && !document.querySelector(".modal-backdrop")) {
+    if (historyKey === "z") { event.preventDefault(); if (event.shiftKey) redo(); else undo(); }
+    else if (historyKey === "y") { event.preventDefault(); redo(); }
+    else if (historyKey === "c") { event.preventDefault(); copySelected(); }
+    else if (historyKey === "v") { event.preventDefault(); pasteClipboard(); }
   }
   if ((event.key === "Delete" || event.key === "Backspace") && !typing && censorState.active && censorState.selectedId) removeCensor(censorState.selectedId);
 });
@@ -692,6 +911,42 @@ async function confirmDelete() {
   if (await confirmDialog(`Delete ${noun}?${extra}`)) deleteSelected();
 }
 
+function startRename(entryId) {
+  const entry = locate(entryId)?.entry;
+  const label = elements.layerTree.querySelector(`[data-id="${entryId}"] .layer-name`);
+  if (!entry || !label) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "rename-input";
+  input.value = entry.name;
+  label.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    if (commit && name && name !== entry.name) {
+      checkpoint();
+      entry.name = name;
+    }
+    render();
+  };
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") finish(true);
+    else if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+  for (const name of ["pointerdown", "click", "dblclick", "contextmenu"]) input.addEventListener(name, (event) => event.stopPropagation());
+}
+
+elements.layerTree.addEventListener("dblclick", (event) => {
+  const row = event.target.closest("[data-id]");
+  if (row && !event.target.closest("[data-toggle]")) startRename(row.dataset.id);
+});
+
 window.addEventListener("contextmenu", hideContextMenu, true);
 elements.layerTree.addEventListener("contextmenu", (event) => {
   const row = event.target.closest("[data-id]");
@@ -702,7 +957,9 @@ elements.layerTree.addEventListener("contextmenu", (event) => {
   const items = [];
   if (selected.some((entry) => !isContainer(entry))) items.push({ label: "New container (Ctrl+G)", action: groupSelected });
   if (selected.some(isContainer)) items.push({ label: "Ungroup", action: ungroupSelected });
+  if (selected.some((entry) => !isContainer(entry))) items.push({ label: "Insert separator above (Ctrl+B)", action: insertSeparatorAbove });
   items.push(
+    ...(selected.length === 1 ? [{ label: "Rename (F2)", action: () => startRename(selected[0].id) }] : []),
     { label: "Duplicate", action: duplicateSelected },
     { label: "Delete…", action: confirmDelete, danger: true },
   );
@@ -818,6 +1075,7 @@ function transformLayer(layer, op) {
 }
 
 function transformSelected(op) {
+  checkpoint();
   const targets = new Set();
   for (const entry of selectedEntries()) {
     if (isContainer(entry)) entry.children.forEach((child) => targets.add(child));
@@ -883,6 +1141,7 @@ function addCensor(layer, box) {
 function removeCensor(censorId) {
   const layer = activeLayer();
   if (!layer) return;
+  checkpoint();
   layer.censors = layer.censors.filter((censor) => censor.id !== censorId);
   if (censorState.selectedId === censorId) censorState.selectedId = null;
   refreshThumbnail(layer);
@@ -898,6 +1157,7 @@ elements.previewOverlay.addEventListener("pointerdown", (event) => {
   if (!layer || !censorState.active || event.button !== 0) return;
   event.preventDefault();
   const point = svgPoint(event);
+  const before = snapshot();
   const { handle, censor: hitId } = event.target.dataset;
   const selected = layer.censors.find((censor) => censor.id === censorState.selectedId);
   if (handle && selected) {
@@ -910,11 +1170,14 @@ elements.previewOverlay.addEventListener("pointerdown", (event) => {
     censorDrag = { censor: addCensor(layer, { x: point.x, y: point.y, w: 0, h: 0 }), mode: "draw", start: point };
   }
   elements.previewOverlay.setPointerCapture(event.pointerId);
+  censorDrag.before = before;
+  censorDrag.moved = false;
   renderOverlay();
 });
 
 elements.previewOverlay.addEventListener("pointermove", (event) => {
   if (!censorDrag) return;
+  censorDrag.moved = true;
   const { censor, mode } = censorDrag;
   const point = svgPoint(event);
   if (mode === "move") {
@@ -944,14 +1207,17 @@ elements.previewOverlay.addEventListener("pointermove", (event) => {
 
 function endCensorDrag() {
   if (!censorDrag) return;
-  const { censor, mode } = censorDrag;
+  const { before, censor, mode, moved } = censorDrag;
   censorDrag = null;
   const layer = activeLayer();
   if (!layer) return;
+  let changed = moved;
   if (mode === "draw" && (censor.w < 6 || censor.h < 6)) {
     layer.censors = layer.censors.filter((candidate) => candidate !== censor);
     censorState.selectedId = null;
+    changed = false;
   }
+  if (changed) pushHistory(before);
   refreshThumbnail(layer);
   render();
 }
@@ -975,7 +1241,7 @@ function renderCensorPanel() {
   add.type = "button";
   add.className = "button";
   add.textContent = "Add box";
-  add.addEventListener("click", () => { addCensor(layer); refreshThumbnail(layer); render(); });
+  add.addEventListener("click", () => { checkpoint(); addCensor(layer); refreshThumbnail(layer); render(); });
   const list = document.createElement("div");
   list.className = "censor-list";
   layer.censors.forEach((censor, index) => {
@@ -1007,6 +1273,7 @@ function renderCensorPanel() {
     input.addEventListener("input", () => {
       const value = key === "color" ? input.value : Number(input.value);
       if (key !== "color" && !Number.isFinite(value)) return;
+      checkpoint(`censor-${censor.id}-${key}`);
       censor[key] = key === "w" || key === "h" ? Math.max(1, value) : value;
       renderOverlay();
     });
@@ -1080,6 +1347,8 @@ async function loadTiff(file) {
       }
     }
     state.root = root;
+    undoStack.length = 0;
+    redoStack.length = 0;
     state.selectedIds.clear();
     state.activeId = null;
     state.sourceName = file.name.replace(/\.tiff?$/i, "") || "layers";
@@ -1199,6 +1468,7 @@ elements.delete.addEventListener("click", deleteSelected);
 elements.duplicate.addEventListener("click", duplicateSelected);
 elements.group.addEventListener("click", groupSelected);
 elements.ungroup.addEventListener("click", ungroupSelected);
+elements.groupLoose.addEventListener("click", groupLoose);
 elements.moveUp.addEventListener("click", () => moveSelected(-1));
 elements.moveDown.addEventListener("click", () => moveSelected(1));
 elements.export.addEventListener("click", exportTiff);
